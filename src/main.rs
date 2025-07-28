@@ -1,3 +1,5 @@
+// This is just an interactive test of the library
+
 use macroquad::prelude::*;
 use ::rand::distr::Uniform;
 use nalgebra::dvector;
