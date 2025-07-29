@@ -1,14 +1,24 @@
-use nalgebra::{DVectorView, DVector};
-use rand::distr::Distribution;
+use nalgebra::{DVector};
+use rand::{distr::Distribution};
 use thiserror::Error;
 
-use crate::activations::ActivationFn;
+use crate::{
+    activations::ActivationFn,
+    dataset::Sample,
+    losses::{self, LossFn},
+};
+
 use layer::{Layer, LayerError};
 
 pub mod layer;
 
 pub struct Network {
     layers: Vec<Layer>,
+}
+
+pub struct NetworkCache {
+    activations: Vec<DVector<f32>>,
+    weighted_inputs: Vec<DVector<f32>>,
 }
 
 #[derive(Debug, Error)]
@@ -21,6 +31,9 @@ pub enum NetworkError {
 
     #[error("{0}")]
     LayerError(#[from] LayerError),
+
+    #[error("{0}")]
+    LossFnError(#[from] losses::LossFnError),
 }
 
 fn check_layer_sizes(layer_sizes: &[usize]) -> Result<(), NetworkError> {
@@ -76,10 +89,44 @@ impl Network {
         Ok(Self { layers })
     }
 
-    pub fn forward(&self, input: DVectorView<f32>) -> Result<DVector<f32>, NetworkError> {
-        let activations = self.layers[0].forward(input)?;
-        self.layers.iter().skip(1).try_fold(activations, |activations, layer| {
-            layer.forward(activations.as_view()).map_err(Into::into)
+    pub fn forward(&mut self, input: DVector<f32>) -> Result<DVector<f32>, NetworkError> {
+        self.layers.iter_mut().try_fold(input, |activations, layer| {
+            layer.forward(activations).map_err(Into::into)
         })
+    }
+
+    pub fn backpropagate(&mut self, dataset: &[Sample], loss: &impl LossFn) -> Result<(), NetworkError> {
+        for sample in dataset.iter() {
+            let outputs = self.forward(sample.inputs().into_owned())?;
+            let mut activation_partial_gradient = loss.partial_gradient(outputs.as_view(), sample.expected_outputs())?;
+
+            activation_partial_gradient = self.layers.last_mut().unwrap().backpropagation_step(
+                outputs.as_view(),
+                activation_partial_gradient.as_view()
+            );
+
+            for i in (0..self.layers.len() - 1).rev() {
+                let (left, right) = self.layers.split_at_mut(i + 1);
+                let previous_input = right[0].get_previous_input();
+                activation_partial_gradient = left[i]
+                    .backpropagation_step(previous_input, activation_partial_gradient.as_view());
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn learn(&mut self, dataset: &[Sample], loss: &impl LossFn, rate: f32) -> Result<(), NetworkError> {
+        if dataset.is_empty() {
+            return Ok(());
+        }
+
+        self.backpropagate(dataset, loss)?;
+
+        for layer in self.layers.iter_mut() {
+            layer.apply_gradient(-rate / dataset.len() as f32);
+        }
+
+        Ok(())
     }
 }
